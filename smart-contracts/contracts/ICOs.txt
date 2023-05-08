@@ -1,0 +1,214 @@
+pragma solidity 0.8.19;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+contract StknICO {
+    //Administration Details
+    address public admin;
+    address payable public ICOWallet;
+
+    //Token
+    IERC20 public token;
+
+    //ICO Details
+    uint public tokenPrice = 0.001 ether;
+    uint public softCap = 0.1 ether;
+    uint public hardCap = 1 ether;
+    uint public raisedAmount;
+    uint public minpurchase = 0.01 ether;
+    uint public maxpurchase = 5 ether;
+    uint public icoStartTime;
+    uint public icoEndTime;
+
+    //Amount of Deposit
+    mapping(address => uint) public amount_of_deposit;
+
+    //ICO State
+    enum State {
+        BEFORE,
+        RUNNING,
+        ENDSUCCESS,
+        ENDFAIL
+    }
+    State public ICOState;
+
+    //Events
+    event Deposit(
+        address indexed from,
+        address indexed to,
+        uint value,
+        uint tokens
+    );
+    event Withdraw(
+        address indexed from,
+        address indexed to,
+        uint value,
+        uint tokens
+    );
+    event Claim(
+        address indexed from,
+        address indexed to,
+        uint value,
+        uint tokens
+    );
+    event TokenBurn(address to, uint amount, uint time);
+
+
+    //Initialize Variables
+    constructor(address payable _icoWallet, address _token) {
+        admin = msg.sender;
+        ICOWallet = _icoWallet;
+        token = IERC20(_token);
+    }
+
+    //Access Control
+    modifier onlyAdmin() {
+        require(msg.sender == admin, "Admin Only function");
+        _;
+    }
+
+    //Receive Ether Directly
+    receive() external payable {
+        Deposit();
+    }
+
+    fallback() external payable {
+        Deposit();
+    }
+
+    /* Functions */
+
+    //Get ICO State
+    function getICOState() external view returns (string memory) {
+        if (ICOState == State.BEFORE) {
+            return "Not Started";
+        } else if (ICOState == State.RUNNING) {
+            return "Running";
+        } else if (ICOState == State.ENDSUCCESS) {
+            return "End Success";
+        } else {
+            return "End Fail";
+        }
+    }
+
+    /* Admin Functions */
+
+    //Start ICO
+    function startICO() external onlyAdmin {
+        require(ICOState == State.BEFORE, "ICO isn't in before state");
+
+        icoStartTime = block.timestamp;
+        icoEndTime = icoStartTime + 86400;
+        ICOState = State.RUNNING;
+    }
+    
+    //End ICO After reaching Hardcap or ICO Timelimit
+    function endIco() public {
+        require(ICOState == State.RUNNING, "ICO Should be in Running State");
+        require(
+            block.timestamp > icoEndTime || raisedAmount >= hardCap,
+            "ICO Hardcap or timelimit not reached"
+        );
+
+        if (raisedAmount >= softCap) {
+            ICOState = State.ENDSUCCESS;
+        } else {
+            ICOState = State.ENDFAIL;
+        }
+    }
+
+    //Change ICO Wallet
+    function changeICOWallet(address payable _newICOWallet) external onlyAdmin {
+        ICOWallet = _newICOWallet;
+    }
+
+    //Change Admin
+    function changeAdmin(address _newAdmin) external onlyAdmin {
+        admin = _newAdmin;
+    }
+
+    /* User Function */
+    
+    //Deposit
+    function deposit() public payable returns (bool) {
+        require(ICOState == State.RUNNING, "ICO isn't running");
+        require(
+            msg.value >= minpurchase && msg.value <= maxpurchase,
+            "Check Min and Max Purchase"
+        );
+        require(
+            amount_of_deposit[msg.sender] + msg.value <= maxpurchase,
+            "Depositor reached maximum Purchase Amount"
+        );
+
+        require(
+            raisedAmount + msg.value <= maxpurchase,
+            "Send within Max Purchase range"
+        );
+        require(
+            block.timestamp <= icoEndTime,
+            "ICO already Reached Maximum time limit"
+        );
+
+        raisedAmount += msg.value;
+        amount_of_deposit[msg.sender] += msg.value;
+
+        (bool transferSuccess, ) = ICOWallet.call{value: msg.value}("");
+        require(transferSuccess, "Failed to Deposit");
+
+        emit Deposit(address(this), msg.sender, msg.value, tokens);
+        return true;
+    }
+
+    //Withdraw
+    function withdraw() external returns (bool){
+        require(ICOState == State.ENDFAIL, "ICO didn't end with fail");
+        require(amount_of_deposit[msg.sender] > 0, "This user didn't deposit");
+
+        (bool transferSuccess, ) = msg.sender.call{value: amount_of_deposit[msg.sender]}("");
+        require(transferSuccess, "Failed to Withdraw");
+
+        transferSuccess = token.transferFrom(msg.sender, address(this), token.balanceOf(msg.sender));
+        require(transferSuccess, "Failed to Withdraw");
+
+        raisedAmount -= amount_of_deposit[msg.sender];
+        amount_of_deposit[msg.sender] = 0;
+
+        emit Withdraw(address(this), msg.sender, msg.value, tokens);
+        return true;
+    }
+
+    //Claim
+    function claim() external returns (bool){
+        require(ICOState == State.ENDSUCCESS, "ICO didn't end with success");
+
+        uint tokens = (amount_of_deposit[msg.sender] / tokenPrice) * 1e18;
+        bool saleSuccess = token.transfer(msg.sender, tokens);
+        require(saleSuccess, "Failed to Claim");
+
+        emit Claim(address(this), msg.sender, msg.value, tokens);
+        return true;
+    }
+
+    //Burn Tokens
+    function burn() external returns (bool) {
+        require(ICOState == State.END, "ICO isn't over yet");
+
+        uint remainingTokens = token.balanceOf(address(this));
+        bool success = token.transfer(address(0), remainingTokens);
+        require(success, "Failed to burn remaining tokens");
+
+        emit TokenBurn(address(0), remainingTokens, block.timestamp);
+        return true;
+    }
+
+    //Check ICO Contract Token Balance
+    function getICOTokenBalance() external view returns (uint) {
+        return token.balanceOf(address(this));
+    }
+
+    //Check ICO Contract Depositor Token Balance
+    function depositorBalanceOf(address _depositor) external view returns (uint) {
+        return token.balanceOf(_depositor);
+    }
+}
